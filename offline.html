@@ -40,6 +40,23 @@
     }
     h1 { font-size: 22px; margin: 0 0 10px; font-weight: 700; }
     p { font-size: 15px; line-height: 1.6; margin: 0 0 26px; color: rgba(244,244,245,0.7); max-width: 380px; }
+    .reconnecting {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 20px;
+      font-size: 14px;
+      color: rgba(244,244,245,0.6);
+    }
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(244,244,245,0.2);
+      border-top-color: #8B5CF6;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
     button {
       appearance: none;
       border: none;
@@ -61,8 +78,9 @@
   <div class="wrap">
     <div class="badge">A</div>
     <h1>You're offline</h1>
-    <p>Alarmind needs an internet connection. Check your network and try again.</p>
-    <button id="retry">Retry</button>
+    <p>Alarmind needs an internet connection. We'll reconnect you automatically as soon as your network is back.</p>
+    <div class="reconnecting"><span class="spinner"></span> Waiting for connection&hellip;</div>
+    <button id="retry">Retry now</button>
     <div class="hint">Alarmind Desktop</div>
   </div>
   <script>

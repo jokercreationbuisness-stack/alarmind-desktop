@@ -239,17 +239,97 @@ function layoutContentView() {
   });
 }
 
+// On Windows, getContentSize() can report stale bounds while a
+// maximize/restore/snap/DPI transition is still in flight, which left the
+// site rendered at the old size until the user forced another resize.
+// Apply the layout now and again after the transition settles.
+function scheduleLayout() {
+  layoutContentView();
+  setTimeout(layoutContentView, 60);
+  setTimeout(layoutContentView, 300);
+}
+
 function loadStartPage() {
   contentView.webContents.loadURL(START_URL).catch(() => {
     showOfflinePage();
   });
 }
 
+// ---- Offline detection & automatic reconnection ---------------------------
+// When a load fails we show the local offline page and start probing the
+// site. The moment it responds, we navigate back to where the user was —
+// no manual retry needed. The renderer's own online event can't be trusted
+// here (it only reflects the OS network state, not actual reachability).
+
+let isShowingOffline = false;
+let reconnectTimer = null;
+// The last real alarmind.in page the user was on, so reconnection returns
+// them there instead of dumping them on the login page.
+let lastGoodUrl = START_URL;
+
+function probeSite() {
+  return new Promise((resolve) => {
+    const req = https.request(
+      `${SITE_ORIGIN}/login`,
+      { method: 'HEAD', timeout: 8000 },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode > 0);
+      }
+    );
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.end();
+  });
+}
+
+function startReconnectLoop() {
+  if (reconnectTimer) return;
+  reconnectTimer = setInterval(async () => {
+    if (!contentView || contentView.webContents.isDestroyed()) {
+      stopReconnectLoop();
+      return;
+    }
+    if (await probeSite()) {
+      stopReconnectLoop();
+      isShowingOffline = false;
+      contentView.webContents.loadURL(lastGoodUrl).catch(() => showOfflinePage());
+    }
+  }, 4000);
+}
+
+function stopReconnectLoop() {
+  if (reconnectTimer) {
+    clearInterval(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
 function showOfflinePage() {
   if (!contentView || contentView.webContents.isDestroyed()) return;
+  isShowingOffline = true;
   contentView.webContents.loadFile(OFFLINE_PAGE).catch(() => {
     /* Nothing more we can do if even the local file fails. */
   });
+  startReconnectLoop();
+}
+
+// Reload the site — used by the titlebar refresh button and Ctrl+R. If we're
+// on the offline screen (or somehow on another local file), a plain reload
+// would just re-show that file, so navigate back to the site instead.
+function refreshSite() {
+  if (!contentView || contentView.webContents.isDestroyed()) return;
+  const current = contentView.webContents.getURL();
+  if (isShowingOffline || current.startsWith('file://')) {
+    stopReconnectLoop();
+    isShowingOffline = false;
+    contentView.webContents.loadURL(lastGoodUrl).catch(() => showOfflinePage());
+  } else {
+    contentView.webContents.reload();
+  }
 }
 
 // ---- Navigation guards ---------------------------------------------------
@@ -335,6 +415,40 @@ function attachNavigationGuards() {
     if (validatedURL && validatedURL.startsWith('file://')) return;
     showOfflinePage();
   });
+
+  // Remember the last real page so reconnection/refresh can return to it,
+  // and clear the offline flag once any alarmind.in page actually loads.
+  contents.on('did-navigate', (_event, url) => {
+    if (isAlarmindUrl(url) && !isLandingPage(url)) {
+      lastGoodUrl = url;
+      isShowingOffline = false;
+      stopReconnectLoop();
+    }
+  });
+  contents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
+    if (isMainFrame && isAlarmindUrl(url) && !isLandingPage(url)) {
+      lastGoodUrl = url;
+    }
+  });
+
+  // If the site's renderer process dies (GPU driver hiccup, out-of-memory,
+  // a Chromium crash), reload it instead of leaving a frozen white window.
+  contents.on('render-process-gone', (_event, details) => {
+    if (details.reason === 'clean-exit') return;
+    setTimeout(() => {
+      if (!contentView || contentView.webContents.isDestroyed()) return;
+      contentView.webContents.loadURL(lastGoodUrl).catch(() => showOfflinePage());
+    }, 1000);
+  });
+
+  // A hung page (unresponsive for 30s+) gets one automatic reload too.
+  contents.on('unresponsive', () => {
+    setTimeout(() => {
+      if (!contentView || contentView.webContents.isDestroyed()) return;
+      if (contentView.webContents.isCrashed()) return; // handled above
+      contentView.webContents.reload();
+    }, 5000);
+  });
 }
 
 // ---- Keyboard shortcuts ---------------------------------------------------
@@ -348,7 +462,7 @@ function attachShortcuts() {
     const ctrl = process.platform === 'darwin' ? input.meta : input.control;
 
     if ((ctrl && key === 'r') || key === 'f5') {
-      contents.reload();
+      refreshSite();
       event.preventDefault();
     } else if (input.alt && key === 'arrowleft') {
       if (contents.canGoBack()) contents.goBack();
@@ -387,6 +501,10 @@ function attachWindowEvents() {
   });
   mainWindow.on('move', scheduleSave);
 
+  // Windows fires 'resize' before the new bounds are final during
+  // maximize/restore/snap and DPI changes — resettle the layout after.
+  mainWindow.on('resized', scheduleLayout);
+
   // Tell the titlebar to swap its maximize/restore glyph.
   const sendMaximized = (isMaximized) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -394,17 +512,22 @@ function attachWindowEvents() {
     }
   };
   mainWindow.on('maximize', () => {
-    layoutContentView();
+    scheduleLayout();
     sendMaximized(true);
   });
   mainWindow.on('unmaximize', () => {
-    layoutContentView();
+    scheduleLayout();
     sendMaximized(false);
   });
 
   // Hide the titlebar strip in fullscreen (e.g. F11 or video fullscreen).
-  mainWindow.on('enter-full-screen', () => layoutContentView());
-  mainWindow.on('leave-full-screen', () => layoutContentView());
+  mainWindow.on('enter-full-screen', () => scheduleLayout());
+  mainWindow.on('leave-full-screen', () => scheduleLayout());
+
+  // Re-showing from tray after a display/DPI change (dock, projector,
+  // remote desktop) needs a fresh layout pass too.
+  mainWindow.on('show', () => scheduleLayout());
+  mainWindow.on('restore', () => scheduleLayout());
 
   mainWindow.on('close', (event) => {
     saveWindowState();
@@ -473,6 +596,9 @@ ipcMain.on('window:maximize-toggle', () => {
 });
 ipcMain.on('window:close', () => {
   if (mainWindow) mainWindow.close();
+});
+ipcMain.on('window:refresh', () => {
+  refreshSite();
 });
 
 // ---- System-browser sign-in handoff ---------------------------------------

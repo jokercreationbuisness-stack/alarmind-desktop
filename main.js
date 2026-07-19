@@ -17,6 +17,7 @@ const {
   session,
   ipcMain,
   nativeImage,
+  desktopCapturer,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -600,6 +601,11 @@ ipcMain.on('window:close', () => {
 ipcMain.on('window:refresh', () => {
   refreshSite();
 });
+// Site-triggered (incoming call / notification click): surface the window
+// even when it's hidden in the tray.
+ipcMain.on('app:show-window', () => {
+  showMainWindow();
+});
 
 // ---- System-browser sign-in handoff ---------------------------------------
 // Google-recommended flow for desktop apps: the user signs in with their real
@@ -692,9 +698,34 @@ ipcMain.on('auth:browser-signin', async () => {
 
 function hardenSession() {
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
-    const allowed = ['notifications', 'clipboard-read', 'clipboard-sanitized-write'];
+    const allowed = [
+      'notifications',
+      'clipboard-read',
+      'clipboard-sanitized-write',
+      // Jitsi calls need camera + microphone ('media' covers both), HTML
+      // fullscreen for the call view, and display-capture for screen share.
+      'media',
+      'fullscreen',
+      'display-capture',
+    ];
     callback(allowed.includes(permission));
   });
+
+  // Screen sharing: Chromium's picker doesn't exist in Electron — without
+  // this handler, Jitsi's "share screen" button silently fails. Share the
+  // primary screen (with audio left to the OS default).
+  session.defaultSession.setDisplayMediaRequestHandler(
+    (_request, callback) => {
+      desktopCapturer
+        .getSources({ types: ['screen'] })
+        .then((sources) => {
+          if (sources.length > 0) callback({ video: sources[0] });
+          else callback({});
+        })
+        .catch(() => callback({}));
+    },
+    { useSystemPicker: true } // Windows 11 native picker when available
+  );
 }
 
 // ---- App lifecycle -------------------------------------------------------

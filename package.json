@@ -52,7 +52,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Alarmind",
-      "artifactName": "Alarmind-Setup.exe"
+      "artifactName": "Alarmind-Setup.exe",
+      "include": "build/installer.nsh"
     },
     "linux": {
       "target": [

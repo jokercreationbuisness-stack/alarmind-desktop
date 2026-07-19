@@ -26,14 +26,19 @@
     "files": [
       "main.js",
       "preload.js",
+      "titlebar.html",
+      "titlebar-preload.js",
       "offline.html",
-      "build/icon.png"
+      "build/icon.png",
+      "build/tray.png"
     ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "build/icon.png"
@@ -47,12 +52,17 @@
       "shortcutName": "Alarmind"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "icon": "build/icon.png",
       "category": "Education"
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "icon": "build/icon.png",
       "category": "public.app-category.education"
     }

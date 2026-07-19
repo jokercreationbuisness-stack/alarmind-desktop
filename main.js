@@ -18,6 +18,8 @@ const {
   ipcMain,
   nativeImage,
   desktopCapturer,
+  screen,
+  powerSaveBlocker,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -66,6 +68,13 @@ let tray = null;
 // Closing the window hides to tray (socket stays connected → notifications
 // keep arriving, like WhatsApp/Slack). Only tray "Quit" really exits.
 let isQuitting = false;
+// The website reports whether a call is live (Jitsi active) over IPC. While
+// true, closing the window collapses to a floating always-on-top mini call
+// window (WhatsApp-style) instead of hiding — the call stays visible.
+let callActive = false;
+let miniCallMode = false;
+let boundsBeforeMini = null;
+let powerSaveBlockerId = null;
 
 // ---- Window state persistence -------------------------------------------
 
@@ -87,6 +96,7 @@ function loadWindowState() {
 
 function saveWindowState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (miniCallMode) return; // never persist the tiny call-window bounds
   const isMaximized = mainWindow.isMaximized();
   const bounds = mainWindow.getNormalBounds();
   try {
@@ -532,9 +542,16 @@ function attachWindowEvents() {
 
   mainWindow.on('close', (event) => {
     saveWindowState();
-    // Hide to tray instead of exiting, so notifications keep arriving.
-    if (!isQuitting) {
-      event.preventDefault();
+    if (isQuitting) return;
+    event.preventDefault();
+    // WhatsApp-style: closing during a live call collapses to a small
+    // always-on-top floating call window instead of vanishing to the tray —
+    // the call continues, visibly. Closing that mini window hides to tray
+    // (the call itself still keeps running; audio continues).
+    if (callActive && !miniCallMode) {
+      enterMiniCallMode();
+    } else {
+      if (miniCallMode) exitMiniCallMode(false);
       mainWindow.hide();
     }
   });
@@ -546,8 +563,67 @@ function attachWindowEvents() {
 
 // ---- Tray (keeps the app alive for notifications) -------------------------
 
+// WhatsApp-style floating call window: when the user closes the app during a
+// live call, shrink to a small always-on-top window in the bottom-right
+// corner instead of hiding. The website sees the resize and collapses the
+// call to its own mini-player UI, so what remains on screen is a tidy
+// floating call tile that keeps the call fully alive.
+const MINI_CALL_WIDTH = 320;
+const MINI_CALL_HEIGHT = 300;
+
+function enterMiniCallMode() {
+  if (!mainWindow || mainWindow.isDestroyed() || miniCallMode) return;
+  miniCallMode = true;
+  boundsBeforeMini = {
+    bounds: mainWindow.getNormalBounds(),
+    isMaximized: mainWindow.isMaximized(),
+    isFullScreen: mainWindow.isFullScreen(),
+  };
+  if (mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+
+  const { workArea } = screen.getPrimaryDisplay();
+  mainWindow.setMinimumSize(MINI_CALL_WIDTH, MINI_CALL_HEIGHT);
+  mainWindow.setBounds({
+    x: workArea.x + workArea.width - MINI_CALL_WIDTH - 16,
+    y: workArea.y + workArea.height - MINI_CALL_HEIGHT - 16,
+    width: MINI_CALL_WIDTH,
+    height: MINI_CALL_HEIGHT,
+  });
+  mainWindow.setAlwaysOnTop(true, 'floating');
+  scheduleLayout();
+  // Tell the site so it can switch the call UI to its mini-player layout.
+  sendToSite('desktop:mini-call-change', true);
+}
+
+function exitMiniCallMode(restoreVisible) {
+  if (!mainWindow || mainWindow.isDestroyed() || !miniCallMode) return;
+  miniCallMode = false;
+  mainWindow.setAlwaysOnTop(false);
+  mainWindow.setMinimumSize(900, 600);
+  if (boundsBeforeMini) {
+    mainWindow.setBounds(boundsBeforeMini.bounds);
+    if (boundsBeforeMini.isMaximized) mainWindow.maximize();
+    if (boundsBeforeMini.isFullScreen) mainWindow.setFullScreen(true);
+    boundsBeforeMini = null;
+  }
+  scheduleLayout();
+  sendToSite('desktop:mini-call-change', false);
+  if (restoreVisible) showMainWindow();
+}
+
+function sendToSite(channel, payload) {
+  if (contentView && !contentView.webContents.isDestroyed()) {
+    contentView.webContents.send(channel, payload);
+  }
+}
+
 function showMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  // Opening the app while in the floating call window restores the full app.
+  if (miniCallMode) {
+    exitMiniCallMode(false);
+  }
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
@@ -604,6 +680,29 @@ ipcMain.on('window:refresh', () => {
 // Site-triggered (incoming call / notification click): surface the window
 // even when it's hidden in the tray.
 ipcMain.on('app:show-window', () => {
+  showMainWindow();
+});
+
+// The website reports call lifecycle over this channel. While a call is
+// live we also block system sleep so Windows doesn't suspend mid-call.
+ipcMain.on('call:state', (_event, isActive) => {
+  callActive = Boolean(isActive);
+  if (callActive) {
+    if (powerSaveBlockerId === null) {
+      powerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+    }
+  } else {
+    if (powerSaveBlockerId !== null) {
+      powerSaveBlocker.stop(powerSaveBlockerId);
+      powerSaveBlockerId = null;
+    }
+    // Call ended while in the floating mini window → restore the full app.
+    if (miniCallMode) exitMiniCallMode(true);
+  }
+});
+
+// The site's mini-player "maximize" button while in the floating window.
+ipcMain.on('call:expand', () => {
   showMainWindow();
 });
 
@@ -711,21 +810,100 @@ function hardenSession() {
     callback(allowed.includes(permission));
   });
 
-  // Screen sharing: Chromium's picker doesn't exist in Electron — without
-  // this handler, Jitsi's "share screen" button silently fails. Share the
-  // primary screen (with audio left to the OS default).
-  session.defaultSession.setDisplayMediaRequestHandler(
-    (_request, callback) => {
-      desktopCapturer
-        .getSources({ types: ['screen'] })
-        .then((sources) => {
-          if (sources.length > 0) callback({ video: sources[0] });
-          else callback({});
-        })
-        .catch(() => callback({}));
+  // Screen sharing: Chromium's picker doesn't exist in Electron — without a
+  // handler, Jitsi's "share screen" button silently fails. Show our own
+  // picker dialog (screens + application windows with live thumbnails).
+  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+    openScreenPicker(callback);
+  });
+}
+
+// ---- Screen-share picker ---------------------------------------------------
+// A small modal dialog listing every screen and window with thumbnails,
+// like Chrome's share dialog. Resolves the display-media callback with the
+// chosen source, or {} to cancel (Jitsi treats that as "user cancelled").
+
+let pickerWindow = null;
+let pickerCallback = null;
+
+function resolvePicker(result) {
+  if (pickerCallback) {
+    const cb = pickerCallback;
+    pickerCallback = null;
+    try {
+      cb(result);
+    } catch {
+      /* stream request may have been aborted meanwhile */
+    }
+  }
+  if (pickerWindow && !pickerWindow.isDestroyed()) pickerWindow.close();
+  pickerWindow = null;
+}
+
+async function openScreenPicker(callback) {
+  // One picker at a time; a second request cancels the first.
+  if (pickerCallback) resolvePicker({});
+  pickerCallback = callback;
+
+  let sources;
+  try {
+    sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 360, height: 240 },
+      fetchWindowIcons: true,
+    });
+  } catch {
+    resolvePicker({});
+    return;
+  }
+
+  pickerWindow = new BrowserWindow({
+    width: 640,
+    height: 520,
+    parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+    modal: true,
+    show: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    autoHideMenuBar: true,
+    title: 'Share your screen',
+    backgroundColor: '#0a0a0a',
+    webPreferences: {
+      preload: path.join(__dirname, 'screen-picker-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
     },
-    { useSystemPicker: true } // Windows 11 native picker when available
-  );
+  });
+  pickerWindow.loadFile(path.join(__dirname, 'screen-picker.html'));
+  pickerWindow.once('ready-to-show', () => {
+    if (!pickerWindow || pickerWindow.isDestroyed()) return;
+    pickerWindow.show();
+    pickerWindow.webContents.send(
+      'screen-picker:sources',
+      sources.map((s) => ({
+        id: s.id,
+        name: s.name,
+        isScreen: s.id.startsWith('screen:'),
+        thumbnail: s.thumbnail.toDataURL(),
+        appIcon: s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null,
+      }))
+    );
+  });
+  // Closing the dialog without choosing = cancel.
+  pickerWindow.on('closed', () => {
+    pickerWindow = null;
+    resolvePicker({});
+  });
+
+  ipcMain.removeAllListeners('screen-picker:select');
+  ipcMain.removeAllListeners('screen-picker:cancel');
+  ipcMain.once('screen-picker:select', (_event, sourceId) => {
+    const source = sources.find((s) => s.id === sourceId);
+    resolvePicker(source ? { video: source } : {});
+  });
+  ipcMain.once('screen-picker:cancel', () => resolvePicker({}));
 }
 
 // ---- App lifecycle -------------------------------------------------------

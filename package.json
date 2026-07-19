@@ -28,6 +28,8 @@
       "preload.js",
       "titlebar.html",
       "titlebar-preload.js",
+      "screen-picker.html",
+      "screen-picker-preload.js",
       "offline.html",
       "build/icon.png",
       "build/tray.png"

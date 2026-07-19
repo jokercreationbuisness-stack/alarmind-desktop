@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('alarmindDesktop', {
   reportCallState: (isActive) => ipcRenderer.send('call:state', Boolean(isActive)),
   // Expand from the floating mini call window back to the full app.
   expandFromMiniCall: () => ipcRenderer.send('call:expand'),
+  // Collapse the app into the floating mini call window (site PiP button).
+  collapseToMiniCall: () => ipcRenderer.send('call:collapse'),
   // Fired with `true` when the shell shrinks to the floating call window and
   // `false` when it restores — the site switches its call UI accordingly.
   onMiniCallChange: (callback) => {

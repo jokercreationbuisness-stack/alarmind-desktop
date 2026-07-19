@@ -40,6 +40,15 @@ const DASHBOARD_URL = `${SITE_ORIGIN}/dashboard`;
 app.setAppUserModelId('in.alarmind.desktop');
 app.setName('Alarmind');
 
+// Use Windows Graphics Capture for screen sharing. Chromium's legacy GDI
+// capturer skips console windows (Command Prompt/PowerShell) and some UWP
+// apps, so they never appear in the share picker without this. Flag names
+// vary across Chromium versions — enabling all is harmless.
+app.commandLine.appendSwitch(
+  'enable-features',
+  'WebRtcAllowWgcDesktopCapturers,AllowWgcWindowCapturer,AllowWgcScreenCapturer'
+);
+
 // The website checks the userAgent for this marker to hide web-only chrome
 // (beta banner, cookie banner, "back to home" links) when running in the app.
 const UA_SUFFIX = ` AlarmindDesktop/${app.getVersion()}`;
@@ -159,6 +168,18 @@ function isGoogleAuthUrl(url) {
       host.endsWith('.accounts.google.com') ||
       host === 'oauth2.googleapis.com'
     );
+  } catch {
+    return false;
+  }
+}
+
+// Site pages that are deliberately opened via window.open as tool popups
+// (whiteboard during a call, etc.) and should become real child windows.
+function isPopupToolUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.origin !== SITE_ORIGIN) return false;
+    return parsed.pathname.startsWith('/whiteboard');
   } catch {
     return false;
   }
@@ -414,7 +435,27 @@ function attachNavigationGuards() {
       contents.loadURL(DASHBOARD_URL).catch(() => showOfflinePage());
       return { action: 'deny' };
     }
-    // Keep in-app Alarmind links inside the same window (no popups).
+    // Tool pages the site intentionally opens as popups (e.g. the whiteboard
+    // during a call) get a real child window — loading them in the main view
+    // would navigate away from the call.
+    if (isPopupToolUrl(url)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 1000,
+          height: 700,
+          autoHideMenuBar: true,
+          title: 'Alarmind',
+          backgroundColor: '#0a0a0a',
+          webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+          },
+        },
+      };
+    }
+    // Keep other in-app Alarmind links inside the same window (no popups).
     contents.loadURL(url).catch(() => showOfflinePage());
     return { action: 'deny' };
   });
@@ -539,6 +580,15 @@ function attachWindowEvents() {
   // remote desktop) needs a fresh layout pass too.
   mainWindow.on('show', () => scheduleLayout());
   mainWindow.on('restore', () => scheduleLayout());
+
+  // Zoom/Meet-style: minimizing the window during a live call pops the
+  // floating always-on-top mini call window instead of hiding the call.
+  mainWindow.on('minimize', () => {
+    if (callActive && !miniCallMode) {
+      mainWindow.restore();
+      enterMiniCallMode();
+    }
+  });
 
   mainWindow.on('close', (event) => {
     saveWindowState();
@@ -704,6 +754,12 @@ ipcMain.on('call:state', (_event, isActive) => {
 // The site's mini-player "maximize" button while in the floating window.
 ipcMain.on('call:expand', () => {
   showMainWindow();
+});
+
+// The site's PiP button during a call: pop the whole call out into the
+// floating always-on-top mini window (Zoom/Meet-style), not an in-page tile.
+ipcMain.on('call:collapse', () => {
+  if (callActive && !miniCallMode) enterMiniCallMode();
 });
 
 // ---- System-browser sign-in handoff ---------------------------------------

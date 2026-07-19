@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Alarmind</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      background: #0a0a0a;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+
+    /* The bar itself is the drag region; buttons opt out below. */
+    .titlebar {
+      display: flex;
+      align-items: center;
+      height: 40px;
+      background: #0a0a0a;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      -webkit-app-region: drag;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      flex: 1;
+      min-width: 0;
+    }
+    .brand img { width: 20px; height: 20px; object-fit: contain; }
+    .brand span {
+      color: rgba(255, 255, 255, 0.85);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+
+    .controls { display: flex; height: 100%; -webkit-app-region: no-drag; }
+    .controls button {
+      width: 52px;
+      height: 100%;
+      border: none;
+      background: transparent;
+      color: rgba(255, 255, 255, 0.75);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: default;
+      outline: none;
+      transition: background 0.12s ease, color 0.12s ease;
+    }
+    .controls button:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+    .controls button:active { background: rgba(255, 255, 255, 0.18); }
+    .controls button.close:hover { background: #e81123; color: #fff; }
+    .controls button.close:active { background: #bf0f1d; }
+    .controls svg { width: 12px; height: 12px; }
+  </style>
+</head>
+<body>
+  <div class="titlebar">
+    <div class="brand">
+      <img src="build/icon.png" alt="" />
+      <span>Alarmind</span>
+    </div>
+    <div class="controls">
+      <button id="min" title="Minimize" aria-label="Minimize">
+        <svg viewBox="0 0 12 12"><line x1="1" y1="6" x2="11" y2="6" stroke="currentColor" stroke-width="1.2"/></svg>
+      </button>
+      <button id="max" title="Maximize" aria-label="Maximize">
+        <svg id="max-icon" viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+        <svg id="restore-icon" viewBox="0 0 12 12" style="display:none">
+          <rect x="1.5" y="3.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.2"/>
+          <path d="M 3.5 3.5 V 1.5 H 10.5 V 8.5 H 8.5" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+      </button>
+      <button id="close" class="close" title="Close" aria-label="Close">
+        <svg viewBox="0 0 12 12">
+          <line x1="1.5" y1="1.5" x2="10.5" y2="10.5" stroke="currentColor" stroke-width="1.2"/>
+          <line x1="10.5" y1="1.5" x2="1.5" y2="10.5" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+  <script>
+    // Note: contextBridge already declares `windowControls` as a global —
+    // re-declaring it via destructuring throws, so use it directly.
+    document.getElementById('min').addEventListener('click', () => windowControls.minimize());
+    document.getElementById('max').addEventListener('click', () => windowControls.maximizeToggle());
+    document.getElementById('close').addEventListener('click', () => windowControls.close());
+
+    // Swap the maximize glyph for the restore glyph while maximized.
+    windowControls.onMaximizedChange((isMaximized) => {
+      document.getElementById('max-icon').style.display = isMaximized ? 'none' : '';
+      document.getElementById('restore-icon').style.display = isMaximized ? '' : 'none';
+      document.getElementById('max').title = isMaximized ? 'Restore' : 'Maximize';
+    });
+  </script>
+</body>
+</html>

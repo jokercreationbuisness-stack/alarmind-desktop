@@ -1,0 +1,73 @@
+name: Build & Sign Release
+
+# Builds the Windows installer on a version tag (v1.0.1, v1.2.0, ...),
+# submits it to SignPath for code signing, and attaches the signed
+# installer to a GitHub Release.
+#
+# Required repository secrets (added after SignPath approves the project):
+#   SIGNPATH_API_TOKEN       - API token from your SignPath user account
+#   SIGNPATH_ORGANIZATION_ID - your SignPath organization ID
+#
+# The project slug / signing policy below must match what you configure
+# in SignPath (project: alarmind-desktop, policy: release-signing).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # needed to create the GitHub Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows installer (unsigned)
+        run: npm run dist:win
+        env:
+          # electron-builder auto-publish off; we attach files ourselves
+          EP_DRAFT: "false"
+
+      - name: Upload unsigned installer
+        id: upload-unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-installer
+          path: release/*.exe
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit signing request to SignPath
+        uses: signpath/github-action-submit-signing-request@v1.2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: alarmind-desktop
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Publish GitHub Release with signed installer
+        uses: softprops/action-gh-release@v2
+        with:
+          files: signed/*.exe
+          generate_release_notes: true
